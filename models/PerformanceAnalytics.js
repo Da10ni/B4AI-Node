@@ -262,8 +262,9 @@ performanceAnalyticsSchema.methods.updateAfterQuiz = async function(quizData) {
     this.difficultyPerformance[difficulty].attempted += totalQuestions;
     this.difficultyPerformance[difficulty].correct += correctAnswers;
   }
-}
   await this.save();
+}
+
 // ✅ FIXED: Updated static method with TIMED quiz count tracking
 performanceAnalyticsSchema.statics.updateWithLastQuiz = async function(userId, quizData) {
   const { quizMode, totalQuestions, correctAnswers, timeSpent, questionTimes } = quizData;
