@@ -210,38 +210,111 @@ questionsSchema.statics.bulkImportQuestions = async function (
     const results = {
       imported: 0,
       skipped: 0,
+      duplicates: 0,
       errors: [],
+      skippedQuestions: [],
+      importedQuestions: []
     };
 
-    for (const questionData of questionsArray) {
+    for (let i = 0; i < questionsArray.length; i++) {
+      const questionData = questionsArray[i];
+      const rowNumber = questionData.originalIndex || i + 2; // Excel rows start at 2 (after header)
+      
       try {
-        // Check if question already exists (by question text and language)
-        const existingQuestion = await this.findOne({
-          question: questionData.question,
-          language: questionData.language,
-        });
+        // Enhanced duplicate check
+        const duplicateQuery = {
+          $or: [
+            // Exact question match in same language
+            {
+              question: questionData.question.trim(),
+              language: questionData.language
+            },
+            // Similar question check (case-insensitive)
+            {
+              question: new RegExp(`^${questionData.question.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+              language: questionData.language
+            }
+          ]
+        };
+
+        const existingQuestion = await this.findOne(duplicateQuery);
 
         if (existingQuestion) {
           results.skipped++;
+          results.duplicates++;
+          results.skippedQuestions.push({
+            question: questionData.question,
+            reason: 'Duplicate question already exists',
+            language: questionData.language,
+            category: questionData.category,
+            rowNumber: rowNumber
+          });
+          continue;
+        }
+
+        // Validate required fields
+        if (!questionData.question || questionData.question.trim().length < 5) {
+          results.skipped++;
+          results.skippedQuestions.push({
+            question: questionData.question || 'Empty question',
+            reason: 'Question text too short or empty',
+            language: questionData.language,
+            category: questionData.category,
+            rowNumber: rowNumber
+          });
+          continue;
+        }
+
+        if (!questionData.options || questionData.options.length < 2) {
+          results.skipped++;
+          results.skippedQuestions.push({
+            question: questionData.question,
+            reason: 'Insufficient answer options (minimum 2 required)',
+            language: questionData.language,
+            category: questionData.category,
+            rowNumber: rowNumber
+          });
+          continue;
+        }
+
+        // Check if correct answer is valid
+        if (questionData.correctAnswer < 0 || questionData.correctAnswer >= questionData.options.length) {
+          results.skipped++;
+          results.skippedQuestions.push({
+            question: questionData.question,
+            reason: 'Invalid correct answer index',
+            language: questionData.language,
+            category: questionData.category,
+            rowNumber: rowNumber
+          });
           continue;
         }
 
         // Create new question
         const newQuestion = new this({
           ...questionData,
+          question: questionData.question.trim(),
+          options: questionData.options.map(opt => opt.trim()),
           creator: userId,
           importDate: new Date(),
+          approved: false, // Set to false by default for review
+          status: 'pending' // Set as pending for admin review
         });
 
-        await newQuestion.save();
+        const savedQuestion = await newQuestion.save();
         results.imported++;
+        results.importedQuestions.push(savedQuestion.toObject());
+        
       } catch (error) {
-        results.errors.push(
-          `Question "${questionData.question?.substring(0, 50)}...": ${
-            error.message
-          }`
-        );
+        results.errors.push(`Row ${rowNumber} - "${questionData.question?.substring(0, 50)}...": ${error.message}`);
         results.skipped++;
+        results.skippedQuestions.push({
+          question: questionData.question || 'Unknown',
+          reason: error.message,
+          language: questionData.language,
+          category: questionData.category,
+          rowNumber: rowNumber
+        });
       }
     }
 
