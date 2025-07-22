@@ -89,355 +89,6 @@ const languageConfigs = {
   }
 };
 
-// Helper function to parse Excel data
-const parseExcelSheet = (workbook, config) => {
-  const worksheet = workbook.Sheets[config.sheetName];
-  
-  if (!worksheet) {
-    throw new Error(`Sheet "${config.sheetName}" not found in Excel file`);
-  }
-
-  // Convert sheet to JSON
-  const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-  
-  if (jsonData.length < 2) {
-    throw new Error(`Sheet "${config.sheetName}" is empty or has no data`);
-  }
-
-  const headers = jsonData[0];
-  const dataRows = jsonData.slice(1);
-
-  // Map column indices
-  const columnIndices = {};
-  Object.keys(config.columns).forEach(key => {
-    const columnName = config.columns[key];
-    const index = headers.findIndex(header => 
-      header && header.toString().toLowerCase().includes(columnName.toLowerCase())
-    );
-    if (index !== -1) {
-      columnIndices[key] = index;
-    }
-  });
-
-  // Validate required columns
-  const requiredColumns = ['question', 'answer', 'optionOne', 'optionTwo', 'optionThree'];
-  const missingColumns = requiredColumns.filter(col => columnIndices[col] === undefined);
-  
-  if (missingColumns.length > 0) {
-    throw new Error(`Missing required columns in ${config.sheetName}: ${missingColumns.join(', ')}`);
-  }
-
-  // Parse data rows
-  const parsedQuestions = [];
-  
-  dataRows.forEach((row, index) => {
-    try {
-      if (!row || row.length === 0) return; // Skip empty rows
-      
-      const question = row[columnIndices.question];
-      const answer = row[columnIndices.answer];
-      const optionOne = row[columnIndices.optionOne];
-      const optionTwo = row[columnIndices.optionTwo];
-      const optionThree = row[columnIndices.optionThree];
-
-      // Skip rows with missing essential data
-      if (!question || !answer || !optionOne || !optionTwo || !optionThree) {
-        return;
-      }
-
-      // Create options array
-      const options = [optionOne, optionTwo, optionThree].map(opt => opt.toString().trim());
-      
-      // Find correct answer index
-      const correctAnswerIndex = options.findIndex(option => 
-        option.toLowerCase() === answer.toString().toLowerCase().trim()
-      );
-
-      if (correctAnswerIndex === -1) {
-        // If exact match not found, add the answer as the first option
-        options.unshift(answer.toString().trim());
-      }
-
-      const questionData = {
-        question: question.toString().trim(),
-        language: config.language,
-        options: options,
-        correctAnswer: correctAnswerIndex === -1 ? 0 : correctAnswerIndex,
-        correctAnswerText: answer.toString().trim(),
-        category: row[columnIndices.category] ? row[columnIndices.category].toString().trim() : 'General',
-        subCategory: row[columnIndices.subCategory] ? row[columnIndices.subCategory].toString().trim() : '',
-        examType: row[columnIndices.examType] ? row[columnIndices.examType].toString().trim() : 'MCAT',
-        wikipediaLink: row[columnIndices.wikipediaLink] ? row[columnIndices.wikipediaLink].toString().trim() : '',
-        originalIndex: row[columnIndices.index] ? parseInt(row[columnIndices.index]) : index + 1,
-        approved: row[columnIndices.approved] ? 
-          (row[columnIndices.approved].toString().toLowerCase() === 'yes' || 
-           row[columnIndices.approved].toString().toLowerCase() === 'sí' || 
-           row[columnIndices.approved].toString().toLowerCase() === 'oui') : false,
-        status: 'active',
-        importSource: 'excel_import'
-      };
-
-      parsedQuestions.push(questionData);
-      
-    } catch (error) {
-      console.error(`Error parsing row ${index + 2} in ${config.sheetName}:`, error.message);
-    }
-  });
-
-  return parsedQuestions;
-};
-
-// Import Excel questions
-// Updated importExcelQuestions function for questions-controller.js
-// Replace the existing importExcelQuestions function with this one:
-
-// Add this to your questions-controller.js to handle force import
-
-export const importExcelQuestions = async (req, res) => {
-  try {
-    console.log('📊 Import Excel questions called');
-    
-    // Check if user is authenticated
-    if (!req.user || !req.user.userId) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required',
-        code: 'AUTH_REQUIRED'
-      });
-    }
-
-    // Check if this is a force import request
-    const isForceImport = req.body.forceImport === 'true';
-    
-    if (isForceImport) {
-      // Handle force import of skipped questions
-      console.log('🔄 Force import requested');
-      
-      let skippedQuestions = [];
-      try {
-        skippedQuestions = JSON.parse(req.body.skippedQuestions || '[]');
-      } catch (error) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid skipped questions data',
-          code: 'INVALID_DATA'
-        });
-      }
-
-      if (skippedQuestions.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'No skipped questions to import',
-          code: 'NO_DATA'
-        });
-      }
-
-      let imported = 0;
-      let failed = 0;
-      let errors = [];
-
-      // Process each skipped question
-      for (const skippedQuestion of skippedQuestions) {
-        try {
-          // For force import, we'll update existing questions or create new ones
-          if (skippedQuestion.reason?.includes('Duplicate')) {
-            // Update existing question
-            const updated = await Questions.findOneAndUpdate(
-              {
-                question: skippedQuestion.question,
-                language: skippedQuestion.language
-              },
-              {
-                ...skippedQuestion.originalData,
-                updatedAt: new Date(),
-                forceImported: true
-              },
-              { new: true, upsert: true }
-            );
-            
-            if (updated) {
-              imported++;
-            } else {
-              failed++;
-            }
-          } else {
-            // Create new question (bypass validation for force import)
-            const newQuestion = new Questions({
-              question: skippedQuestion.question || 'Untitled Question',
-              language: skippedQuestion.language || 'english',
-              options: skippedQuestion.originalData?.options || ['Option 1', 'Option 2'],
-              correctAnswer: skippedQuestion.originalData?.correctAnswer || 0,
-              correctAnswerText: skippedQuestion.originalData?.correctAnswerText || 'Option 1',
-              category: skippedQuestion.category || 'Uncategorized',
-              creator: req.user.userId,
-              importDate: new Date(),
-              forceImported: true,
-              status: 'pending',
-              approved: false
-            });
-
-            await newQuestion.save({ validateBeforeSave: false });
-            imported++;
-          }
-        } catch (error) {
-          console.error(`Failed to force import question: ${error.message}`);
-          errors.push(`${skippedQuestion.question?.substring(0, 50)}...: ${error.message}`);
-          failed++;
-        }
-      }
-
-      return res.status(200).json({
-        success: true,
-        message: `Force imported ${imported} questions. ${failed} failed.`,
-        imported,
-        failed,
-        errors: errors.slice(0, 10)
-      });
-    }
-
-    // Normal import process (existing code)
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No Excel file uploaded',
-        code: 'FILE_REQUIRED'
-      });
-    }
-
-    // Parse selected languages
-    let selectedLanguages = ['english'];
-    if (req.body.languages) {
-      try {
-        selectedLanguages = JSON.parse(req.body.languages);
-      } catch (error) {
-        console.error('Error parsing languages:', error);
-      }
-    }
-
-    console.log('Selected languages:', selectedLanguages);
-    console.log('Uploaded file:', req.file.filename);
-
-    // Read the Excel file
-    const workbook = XLSX.readFile(req.file.path);
-    console.log('Available sheets:', workbook.SheetNames);
-
-    let totalImported = 0;
-    let totalSkipped = 0;
-    let totalDuplicates = 0;
-    let allErrors = [];
-    let allSkippedQuestions = [];
-    let allImportedQuestions = [];
-
-    // Process each selected language
-    for (const language of selectedLanguages) {
-      try {
-        console.log(`Processing ${language} questions...`);
-        
-        const config = languageConfigs[language];
-        if (!config) {
-          allErrors.push(`Unsupported language: ${language}`);
-          continue;
-        }
-
-        // Parse questions from the sheet with enhanced data
-        const questions = parseExcelSheetWithDetails(workbook, config);
-        console.log(`Parsed ${questions.length} questions for ${language}`);
-
-        if (questions.length === 0) {
-          allErrors.push(`No valid questions found in ${config.sheetName}`);
-          continue;
-        }
-
-        // Bulk import questions with enhanced tracking
-        const result = await Questions.bulkImportQuestions(questions, req.user.userId);
-        
-        totalImported += result.imported;
-        totalSkipped += result.skipped;
-        totalDuplicates += result.duplicates || 0;
-        allErrors = allErrors.concat(result.errors);
-        
-        // Store original data with skipped questions for potential force import
-        if (result.skippedQuestions && result.skippedQuestions.length > 0) {
-          const enhancedSkippedQuestions = result.skippedQuestions.map((sq, idx) => ({
-            ...sq,
-            originalData: questions.find(q => q.question === sq.question) || {}
-          }));
-          allSkippedQuestions = allSkippedQuestions.concat(enhancedSkippedQuestions);
-        }
-        
-        if (result.importedQuestions && result.importedQuestions.length > 0) {
-          allImportedQuestions = allImportedQuestions.concat(result.importedQuestions);
-        }
-
-        console.log(`${language} import result:`, {
-          imported: result.imported,
-          skipped: result.skipped,
-          duplicates: result.duplicates || 0
-        });
-        
-      } catch (error) {
-        console.error(`Error processing ${language}:`, error.message);
-        allErrors.push(`${language}: ${error.message}`);
-      }
-    }
-
-    // Clean up uploaded file
-    try {
-      fs.unlinkSync(req.file.path);
-    } catch (error) {
-      console.error('Error deleting uploaded file:', error);
-    }
-
-    // Prepare response
-    const success = totalImported > 0 || totalSkipped > 0;
-    let message = '';
-    
-    if (totalImported > 0 && totalSkipped === 0) {
-      message = `Successfully imported all ${totalImported} questions!`;
-    } else if (totalImported > 0 && totalSkipped > 0) {
-      message = `Imported ${totalImported} questions. ${totalSkipped} questions were skipped (${totalDuplicates} duplicates).`;
-    } else if (totalImported === 0 && totalSkipped > 0) {
-      message = `No new questions imported. All ${totalSkipped} questions were skipped (${totalDuplicates} duplicates).`;
-    } else {
-      message = 'No questions were processed from the file.';
-    }
-
-    res.status(success ? 200 : 400).json({
-      success,
-      message,
-      imported: totalImported,
-      skipped: totalSkipped,
-      duplicates: totalDuplicates,
-      errors: allErrors.slice(0, 10),
-      skippedQuestions: allSkippedQuestions,
-      quizzes: allImportedQuestions,
-      processedLanguages: selectedLanguages,
-      summary: {
-        totalProcessed: totalImported + totalSkipped,
-        successRate: totalImported > 0 ? ((totalImported / (totalImported + totalSkipped)) * 100).toFixed(1) + '%' : '0%'
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Import Excel error:', error);
-    
-    if (req.file && req.file.path) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (cleanupError) {
-        console.error('Error cleaning up file:', cleanupError);
-      }
-    }
-
-    res.status(500).json({
-      success: false,
-      message: 'Failed to import questions',
-      error: error.message,
-      code: 'IMPORT_ERROR'
-    });
-  }
-};
-
 // Enhanced parseExcelSheet function to preserve original data
 const parseExcelSheetWithDetails = (workbook, config) => {
   const worksheet = workbook.Sheets[config.sheetName];
@@ -499,6 +150,31 @@ const parseExcelSheetWithDetails = (workbook, config) => {
         options.unshift(answer.toString().trim());
       }
 
+      // FIXED: Enhanced approved parsing to handle all cases including accented characters
+      let approvedValue = false;
+      if (columnIndices.approved !== undefined && row[columnIndices.approved] !== undefined) {
+        const approvedCell = row[columnIndices.approved];
+        if (approvedCell !== null && approvedCell !== '') {
+          // Use String() to safely convert and trim
+          const approvedStr = String(approvedCell).trim().toLowerCase();
+          
+          // Check for various approved values
+          approvedValue = approvedStr === 'yes' || 
+                         approvedStr === 'sí' ||  // Spanish with accent
+                         approvedStr === 'si' ||  // Spanish without accent
+                         approvedStr === 'oui' || // French
+                         approvedStr === 'true' ||
+                         approvedStr === '1' ||
+                         approvedCell === true ||
+                         approvedCell === 1;
+          
+          // Debug log for first few questions
+          if (index < 5) {
+            console.log(`[${config.language}] Row ${index + 2} - Approved: "${approvedCell}" (type: ${typeof approvedCell}) => ${approvedValue}`);
+          }
+        }
+      }
+
       const questionData = {
         question: question.toString().trim(),
         language: config.language,
@@ -510,10 +186,7 @@ const parseExcelSheetWithDetails = (workbook, config) => {
         examType: row[columnIndices.examType] ? row[columnIndices.examType].toString().trim() : 'MCAT',
         wikipediaLink: row[columnIndices.wikipediaLink] ? row[columnIndices.wikipediaLink].toString().trim() : '',
         originalIndex: row[columnIndices.index] ? parseInt(row[columnIndices.index]) : index + 1,
-        approved: row[columnIndices.approved] ? 
-          (row[columnIndices.approved].toString().toLowerCase() === 'yes' || 
-           row[columnIndices.approved].toString().toLowerCase() === 'sí' || 
-           row[columnIndices.approved].toString().toLowerCase() === 'oui') : false,
+        approved: approvedValue, // Use enhanced parsing result
         status: 'active',
         importSource: 'excel_import'
       };
@@ -525,8 +198,273 @@ const parseExcelSheetWithDetails = (workbook, config) => {
     }
   });
 
+  // Log summary of approved status
+  const approvedCount = parsedQuestions.filter(q => q.approved).length;
+  console.log(`[${config.language}] Parsed ${parsedQuestions.length} questions, ${approvedCount} approved`);
+
   return parsedQuestions;
 };
+
+// Import Excel questions - FIXED VERSION
+export const importExcelQuestions = async (req, res) => {
+  try {
+    console.log('📊 Import Excel questions called');
+    
+    // Check if user is authenticated
+    if (!req.user || !req.user.userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+        code: 'AUTH_REQUIRED'
+      });
+    }
+
+    // Check if this is a force import request
+    const isForceImport = req.body.forceImport === 'true';
+    
+    if (isForceImport) {
+      // Handle force import of skipped questions
+      console.log('🔄 Force import requested');
+      
+      let skippedQuestions = [];
+      try {
+        skippedQuestions = JSON.parse(req.body.skippedQuestions || '[]');
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid skipped questions data',
+          code: 'INVALID_DATA'
+        });
+      }
+
+      if (skippedQuestions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No skipped questions to import',
+          code: 'NO_DATA'
+        });
+      }
+
+      let imported = 0;
+      let failed = 0;
+      let errors = [];
+
+      // Process each skipped question
+      for (const skippedQuestion of skippedQuestions) {
+        try {
+          // For force import, we'll update existing questions or create new ones
+          if (skippedQuestion.reason?.includes('Duplicate')) {
+            // Update existing question - PRESERVE APPROVED STATUS
+            const updated = await Questions.findOneAndUpdate(
+              {
+                question: skippedQuestion.question,
+                language: skippedQuestion.language
+              },
+              {
+                ...skippedQuestion.originalData,
+                updatedAt: new Date(),
+                forceImported: true,
+                // PRESERVE original approved status - CRITICAL!
+                approved: skippedQuestion.originalData?.approved === true,
+                status: skippedQuestion.originalData?.status || 'active'
+              },
+              { new: true, upsert: true }
+            );
+            
+            if (updated) {
+              imported++;
+              console.log(`✅ Force updated question with approved=${updated.approved}`);
+            } else {
+              failed++;
+            }
+          } else {
+            // Create new question - PRESERVE APPROVED STATUS
+            const newQuestion = new Questions({
+              question: skippedQuestion.question || 'Untitled Question',
+              language: skippedQuestion.language || 'english',
+              options: skippedQuestion.originalData?.options || ['Option 1', 'Option 2'],
+              correctAnswer: skippedQuestion.originalData?.correctAnswer || 0,
+              correctAnswerText: skippedQuestion.originalData?.correctAnswerText || 'Option 1',
+              category: skippedQuestion.category || 'Uncategorized',
+              creator: req.user.userId,
+              importDate: new Date(),
+              forceImported: true,
+              // PRESERVE original status and approved values - CRITICAL!
+              status: skippedQuestion.originalData?.status || 'active',
+              approved: skippedQuestion.originalData?.approved === true
+            });
+
+            await newQuestion.save({ validateBeforeSave: false });
+            imported++;
+            console.log(`✅ Force created question with approved=${newQuestion.approved}`);
+          }
+        } catch (error) {
+          console.error(`Failed to force import question: ${error.message}`);
+          errors.push(`${skippedQuestion.question?.substring(0, 50)}...: ${error.message}`);
+          failed++;
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Force imported ${imported} questions. ${failed} failed.`,
+        imported,
+        failed,
+        errors: errors.slice(0, 10)
+      });
+    }
+
+    // Normal import process
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No Excel file uploaded',
+        code: 'FILE_REQUIRED'
+      });
+    }
+
+    // Parse selected languages
+    let selectedLanguages = ['english'];
+    if (req.body.languages) {
+      try {
+        selectedLanguages = JSON.parse(req.body.languages);
+      } catch (error) {
+        console.error('Error parsing languages:', error);
+      }
+    }
+
+    console.log('Selected languages:', selectedLanguages);
+    console.log('Uploaded file:', req.file.filename);
+
+    // Read the Excel file
+    const workbook = XLSX.readFile(req.file.path);
+    console.log('Available sheets:', workbook.SheetNames);
+
+    let totalImported = 0;
+    let totalSkipped = 0;
+    let totalDuplicates = 0;
+    let allErrors = [];
+    let allSkippedQuestions = [];
+    let allImportedQuestions = [];
+
+    // Process each selected language
+    for (const language of selectedLanguages) {
+      try {
+        console.log(`\n🌍 Processing ${language} questions...`);
+        
+        const config = languageConfigs[language];
+        if (!config) {
+          allErrors.push(`Unsupported language: ${language}`);
+          continue;
+        }
+
+        // Parse questions from the sheet with enhanced data
+        const questions = parseExcelSheetWithDetails(workbook, config);
+        console.log(`📝 Parsed ${questions.length} questions for ${language}`);
+
+        if (questions.length === 0) {
+          allErrors.push(`No valid questions found in ${config.sheetName}`);
+          continue;
+        }
+
+        // Log sample of parsed data for debugging
+        console.log(`Sample parsed data (first 3 questions):`);
+        questions.slice(0, 3).forEach((q, i) => {
+          console.log(`  Q${i + 1}: approved=${q.approved}, question="${q.question.substring(0, 40)}..."`);
+        });
+
+        // Bulk import questions with enhanced tracking
+        const result = await Questions.bulkImportQuestions(questions, req.user.userId);
+        
+        totalImported += result.imported;
+        totalSkipped += result.skipped;
+        totalDuplicates += result.duplicates || 0;
+        allErrors = allErrors.concat(result.errors);
+        
+        // Skipped questions already have originalData from bulkImportQuestions
+        if (result.skippedQuestions && result.skippedQuestions.length > 0) {
+          allSkippedQuestions = allSkippedQuestions.concat(result.skippedQuestions);
+        }
+        
+        if (result.importedQuestions && result.importedQuestions.length > 0) {
+          allImportedQuestions = allImportedQuestions.concat(result.importedQuestions);
+        }
+
+        console.log(`✅ ${language} import result:`, {
+          imported: result.imported,
+          skipped: result.skipped,
+          duplicates: result.duplicates || 0
+        });
+        
+      } catch (error) {
+        console.error(`Error processing ${language}:`, error.message);
+        allErrors.push(`${language}: ${error.message}`);
+      }
+    }
+
+    // Clean up uploaded file
+    try {
+      fs.unlinkSync(req.file.path);
+    } catch (error) {
+      console.error('Error deleting uploaded file:', error);
+    }
+
+    // Prepare response
+    const success = totalImported > 0 || totalSkipped > 0;
+    let message = '';
+    
+    if (totalImported > 0 && totalSkipped === 0) {
+      message = `Successfully imported all ${totalImported} questions!`;
+    } else if (totalImported > 0 && totalSkipped > 0) {
+      message = `Imported ${totalImported} questions. ${totalSkipped} questions were skipped (${totalDuplicates} duplicates).`;
+    } else if (totalImported === 0 && totalSkipped > 0) {
+      message = `No new questions imported. All ${totalSkipped} questions were skipped (${totalDuplicates} duplicates).`;
+    } else {
+      message = 'No questions were processed from the file.';
+    }
+
+    // Log final summary
+    console.log('\n📊 Import Summary:');
+    console.log(`  Total Imported: ${totalImported}`);
+    console.log(`  Total Skipped: ${totalSkipped}`);
+    console.log(`  Total Duplicates: ${totalDuplicates}`);
+
+    res.status(success ? 200 : 400).json({
+      success,
+      message,
+      imported: totalImported,
+      skipped: totalSkipped,
+      duplicates: totalDuplicates,
+      errors: allErrors.slice(0, 10),
+      skippedQuestions: allSkippedQuestions,
+      quizzes: allImportedQuestions,
+      processedLanguages: selectedLanguages,
+      summary: {
+        totalProcessed: totalImported + totalSkipped,
+        successRate: totalImported > 0 ? ((totalImported / (totalImported + totalSkipped)) * 100).toFixed(1) + '%' : '0%'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Import Excel error:', error);
+    
+    if (req.file && req.file.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (cleanupError) {
+        console.error('Error cleaning up file:', cleanupError);
+      }
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to import questions',
+      error: error.message,
+      code: 'IMPORT_ERROR'
+    });
+  }
+};
+
 // Get all questions with filters
 export const getAllQuestions = async (req, res) => {
   try {
@@ -662,13 +600,15 @@ export const getRandomQuestions = async (req, res) => {
   }
 };
 
-// Create single question
+// Create single question - PRESERVE APPROVED STATUS
 export const createQuestion = async (req, res) => {
   try {
     const questionData = {
       ...req.body,
-      creator: req.user.userId, // Updated for your auth system
-      importSource: 'manual_entry'
+      creator: req.user.userId,
+      importSource: 'manual_entry',
+      // Don't override approved if it's provided in the request
+      approved: req.body.approved === true
     };
 
     const newQuestion = new Questions(questionData);
@@ -676,6 +616,8 @@ export const createQuestion = async (req, res) => {
 
     // Populate creator info
     await newQuestion.populate('creator', 'name email role');
+
+    console.log(`✅ Created question with approved=${newQuestion.approved}`);
 
     res.status(201).json({
       success: true,

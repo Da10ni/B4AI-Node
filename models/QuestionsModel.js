@@ -100,6 +100,12 @@ const questionsSchema = new mongoose.Schema(
       default: Date.now,
     },
 
+    // Force import flag
+    forceImported: {
+      type: Boolean,
+      default: false,
+    },
+
     // Reference to creator/admin who imported
     creator: {
       type: mongoose.Schema.Types.ObjectId,
@@ -201,7 +207,7 @@ questionsSchema.methods.toQuizFormat = function () {
   };
 };
 
-// Static method for bulk import
+// Static method for bulk import - FIXED VERSION
 questionsSchema.statics.bulkImportQuestions = async function (
   questionsArray,
   userId
@@ -216,9 +222,22 @@ questionsSchema.statics.bulkImportQuestions = async function (
       importedQuestions: []
     };
 
+    // Log summary of what we're importing
+    const approvedCount = questionsArray.filter(q => q.approved === true).length;
+    console.log(`📋 Bulk import: ${questionsArray.length} questions (${approvedCount} pre-approved)`);
+
     for (let i = 0; i < questionsArray.length; i++) {
       const questionData = questionsArray[i];
       const rowNumber = questionData.originalIndex || i + 2; // Excel rows start at 2 (after header)
+      
+      // DEBUG: First 5 questions ka approved value check karo
+      if (i < 5) {
+        console.log(`❓ Question ${i + 1} approved check:`, {
+          originalValue: questionData.approved,
+          type: typeof questionData.approved,
+          willBeApproved: Boolean(questionData.approved)
+        });
+      }
       
       try {
         // Enhanced duplicate check
@@ -247,7 +266,8 @@ questionsSchema.statics.bulkImportQuestions = async function (
             reason: 'Duplicate question already exists',
             language: questionData.language,
             category: questionData.category,
-            rowNumber: rowNumber
+            rowNumber: rowNumber,
+            originalData: questionData // Store complete original data
           });
           continue;
         }
@@ -260,7 +280,8 @@ questionsSchema.statics.bulkImportQuestions = async function (
             reason: 'Question text too short or empty',
             language: questionData.language,
             category: questionData.category,
-            rowNumber: rowNumber
+            rowNumber: rowNumber,
+            originalData: questionData
           });
           continue;
         }
@@ -272,7 +293,8 @@ questionsSchema.statics.bulkImportQuestions = async function (
             reason: 'Insufficient answer options (minimum 2 required)',
             language: questionData.language,
             category: questionData.category,
-            rowNumber: rowNumber
+            rowNumber: rowNumber,
+            originalData: questionData
           });
           continue;
         }
@@ -285,21 +307,33 @@ questionsSchema.statics.bulkImportQuestions = async function (
             reason: 'Invalid correct answer index',
             language: questionData.language,
             category: questionData.category,
-            rowNumber: rowNumber
+            rowNumber: rowNumber,
+            originalData: questionData
           });
           continue;
         }
 
-        // Create new question
+        // Create new question - FIXED: Approved value preserve karo
         const newQuestion = new this({
           ...questionData,
           question: questionData.question.trim(),
           options: questionData.options.map(opt => opt.trim()),
           creator: userId,
           importDate: new Date(),
-          approved: false, // Set to false by default for review
-          status: 'pending' // Set as pending for admin review
+          // ✅ FIX: Direct approved value pass karo, override mat karo
+          approved: Boolean(questionData.approved), // Ye ensure karta hai ke boolean ho
+          // Status bhi preserve karo
+          status: questionData.status || 'active'
         });
+
+        // Debug log for first few imports
+        if (i < 3) {
+          console.log(`✅ Saving Q${i + 1}:`, {
+            approved: newQuestion.approved,
+            status: newQuestion.status,
+            question: newQuestion.question.substring(0, 40) + '...'
+          });
+        }
 
         const savedQuestion = await newQuestion.save();
         results.imported++;
@@ -313,10 +347,15 @@ questionsSchema.statics.bulkImportQuestions = async function (
           reason: error.message,
           language: questionData.language,
           category: questionData.category,
-          rowNumber: rowNumber
+          rowNumber: rowNumber,
+          originalData: questionData
         });
       }
     }
+
+    // Log import summary
+    const importedApproved = results.importedQuestions.filter(q => q.approved === true).length;
+    console.log(`✅ Import complete: ${results.imported} imported (${importedApproved} approved), ${results.skipped} skipped`);
 
     return results;
   } catch (error) {
