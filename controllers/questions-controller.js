@@ -188,11 +188,16 @@ const parseExcelSheet = (workbook, config) => {
 };
 
 // Import Excel questions
+// Updated importExcelQuestions function for questions-controller.js
+// Replace the existing importExcelQuestions function with this one:
+
+// Add this to your questions-controller.js to handle force import
+
 export const importExcelQuestions = async (req, res) => {
   try {
     console.log('📊 Import Excel questions called');
     
-    // Check if user is authenticated - Updated for your auth system
+    // Check if user is authenticated
     if (!req.user || !req.user.userId) {
       return res.status(401).json({
         success: false,
@@ -201,7 +206,96 @@ export const importExcelQuestions = async (req, res) => {
       });
     }
 
-    // Check if file was uploaded
+    // Check if this is a force import request
+    const isForceImport = req.body.forceImport === 'true';
+    
+    if (isForceImport) {
+      // Handle force import of skipped questions
+      console.log('🔄 Force import requested');
+      
+      let skippedQuestions = [];
+      try {
+        skippedQuestions = JSON.parse(req.body.skippedQuestions || '[]');
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid skipped questions data',
+          code: 'INVALID_DATA'
+        });
+      }
+
+      if (skippedQuestions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No skipped questions to import',
+          code: 'NO_DATA'
+        });
+      }
+
+      let imported = 0;
+      let failed = 0;
+      let errors = [];
+
+      // Process each skipped question
+      for (const skippedQuestion of skippedQuestions) {
+        try {
+          // For force import, we'll update existing questions or create new ones
+          if (skippedQuestion.reason?.includes('Duplicate')) {
+            // Update existing question
+            const updated = await Questions.findOneAndUpdate(
+              {
+                question: skippedQuestion.question,
+                language: skippedQuestion.language
+              },
+              {
+                ...skippedQuestion.originalData,
+                updatedAt: new Date(),
+                forceImported: true
+              },
+              { new: true, upsert: true }
+            );
+            
+            if (updated) {
+              imported++;
+            } else {
+              failed++;
+            }
+          } else {
+            // Create new question (bypass validation for force import)
+            const newQuestion = new Questions({
+              question: skippedQuestion.question || 'Untitled Question',
+              language: skippedQuestion.language || 'english',
+              options: skippedQuestion.originalData?.options || ['Option 1', 'Option 2'],
+              correctAnswer: skippedQuestion.originalData?.correctAnswer || 0,
+              correctAnswerText: skippedQuestion.originalData?.correctAnswerText || 'Option 1',
+              category: skippedQuestion.category || 'Uncategorized',
+              creator: req.user.userId,
+              importDate: new Date(),
+              forceImported: true,
+              status: 'pending',
+              approved: false
+            });
+
+            await newQuestion.save({ validateBeforeSave: false });
+            imported++;
+          }
+        } catch (error) {
+          console.error(`Failed to force import question: ${error.message}`);
+          errors.push(`${skippedQuestion.question?.substring(0, 50)}...: ${error.message}`);
+          failed++;
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Force imported ${imported} questions. ${failed} failed.`,
+        imported,
+        failed,
+        errors: errors.slice(0, 10)
+      });
+    }
+
+    // Normal import process (existing code)
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -211,7 +305,7 @@ export const importExcelQuestions = async (req, res) => {
     }
 
     // Parse selected languages
-    let selectedLanguages = ['english']; // default
+    let selectedLanguages = ['english'];
     if (req.body.languages) {
       try {
         selectedLanguages = JSON.parse(req.body.languages);
@@ -229,7 +323,10 @@ export const importExcelQuestions = async (req, res) => {
 
     let totalImported = 0;
     let totalSkipped = 0;
+    let totalDuplicates = 0;
     let allErrors = [];
+    let allSkippedQuestions = [];
+    let allImportedQuestions = [];
 
     // Process each selected language
     for (const language of selectedLanguages) {
@@ -242,8 +339,8 @@ export const importExcelQuestions = async (req, res) => {
           continue;
         }
 
-        // Parse questions from the sheet
-        const questions = parseExcelSheet(workbook, config);
+        // Parse questions from the sheet with enhanced data
+        const questions = parseExcelSheetWithDetails(workbook, config);
         console.log(`Parsed ${questions.length} questions for ${language}`);
 
         if (questions.length === 0) {
@@ -251,14 +348,32 @@ export const importExcelQuestions = async (req, res) => {
           continue;
         }
 
-        // Bulk import questions - Updated for your auth system
+        // Bulk import questions with enhanced tracking
         const result = await Questions.bulkImportQuestions(questions, req.user.userId);
         
         totalImported += result.imported;
         totalSkipped += result.skipped;
+        totalDuplicates += result.duplicates || 0;
         allErrors = allErrors.concat(result.errors);
+        
+        // Store original data with skipped questions for potential force import
+        if (result.skippedQuestions && result.skippedQuestions.length > 0) {
+          const enhancedSkippedQuestions = result.skippedQuestions.map((sq, idx) => ({
+            ...sq,
+            originalData: questions.find(q => q.question === sq.question) || {}
+          }));
+          allSkippedQuestions = allSkippedQuestions.concat(enhancedSkippedQuestions);
+        }
+        
+        if (result.importedQuestions && result.importedQuestions.length > 0) {
+          allImportedQuestions = allImportedQuestions.concat(result.importedQuestions);
+        }
 
-        console.log(`${language} import result:`, result);
+        console.log(`${language} import result:`, {
+          imported: result.imported,
+          skipped: result.skipped,
+          duplicates: result.duplicates || 0
+        });
         
       } catch (error) {
         console.error(`Error processing ${language}:`, error.message);
@@ -273,25 +388,39 @@ export const importExcelQuestions = async (req, res) => {
       console.error('Error deleting uploaded file:', error);
     }
 
-    // Send response
-    const success = totalImported > 0;
-    const message = success 
-      ? `Successfully imported ${totalImported} questions across ${selectedLanguages.length} language(s)`
-      : 'No questions were imported';
+    // Prepare response
+    const success = totalImported > 0 || totalSkipped > 0;
+    let message = '';
+    
+    if (totalImported > 0 && totalSkipped === 0) {
+      message = `Successfully imported all ${totalImported} questions!`;
+    } else if (totalImported > 0 && totalSkipped > 0) {
+      message = `Imported ${totalImported} questions. ${totalSkipped} questions were skipped (${totalDuplicates} duplicates).`;
+    } else if (totalImported === 0 && totalSkipped > 0) {
+      message = `No new questions imported. All ${totalSkipped} questions were skipped (${totalDuplicates} duplicates).`;
+    } else {
+      message = 'No questions were processed from the file.';
+    }
 
     res.status(success ? 200 : 400).json({
       success,
       message,
       imported: totalImported,
       skipped: totalSkipped,
-      errors: allErrors.slice(0, 10), // Limit errors to first 10
-      processedLanguages: selectedLanguages
+      duplicates: totalDuplicates,
+      errors: allErrors.slice(0, 10),
+      skippedQuestions: allSkippedQuestions,
+      quizzes: allImportedQuestions,
+      processedLanguages: selectedLanguages,
+      summary: {
+        totalProcessed: totalImported + totalSkipped,
+        successRate: totalImported > 0 ? ((totalImported / (totalImported + totalSkipped)) * 100).toFixed(1) + '%' : '0%'
+      }
     });
 
   } catch (error) {
     console.error('❌ Import Excel error:', error);
     
-    // Clean up uploaded file on error
     if (req.file && req.file.path) {
       try {
         fs.unlinkSync(req.file.path);
@@ -309,6 +438,95 @@ export const importExcelQuestions = async (req, res) => {
   }
 };
 
+// Enhanced parseExcelSheet function to preserve original data
+const parseExcelSheetWithDetails = (workbook, config) => {
+  const worksheet = workbook.Sheets[config.sheetName];
+  
+  if (!worksheet) {
+    throw new Error(`Sheet "${config.sheetName}" not found in Excel file`);
+  }
+
+  const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+  
+  if (jsonData.length < 2) {
+    throw new Error(`Sheet "${config.sheetName}" is empty or has no data`);
+  }
+
+  const headers = jsonData[0];
+  const dataRows = jsonData.slice(1);
+
+  const columnIndices = {};
+  Object.keys(config.columns).forEach(key => {
+    const columnName = config.columns[key];
+    const index = headers.findIndex(header => 
+      header && header.toString().toLowerCase().includes(columnName.toLowerCase())
+    );
+    if (index !== -1) {
+      columnIndices[key] = index;
+    }
+  });
+
+  const requiredColumns = ['question', 'answer', 'optionOne', 'optionTwo', 'optionThree'];
+  const missingColumns = requiredColumns.filter(col => columnIndices[col] === undefined);
+  
+  if (missingColumns.length > 0) {
+    throw new Error(`Missing required columns in ${config.sheetName}: ${missingColumns.join(', ')}`);
+  }
+
+  const parsedQuestions = [];
+  
+  dataRows.forEach((row, index) => {
+    try {
+      if (!row || row.length === 0) return;
+      
+      const question = row[columnIndices.question];
+      const answer = row[columnIndices.answer];
+      const optionOne = row[columnIndices.optionOne];
+      const optionTwo = row[columnIndices.optionTwo];
+      const optionThree = row[columnIndices.optionThree];
+
+      if (!question || !answer || !optionOne || !optionTwo || !optionThree) {
+        return;
+      }
+
+      const options = [optionOne, optionTwo, optionThree].map(opt => opt.toString().trim());
+      
+      const correctAnswerIndex = options.findIndex(option => 
+        option.toLowerCase() === answer.toString().toLowerCase().trim()
+      );
+
+      if (correctAnswerIndex === -1) {
+        options.unshift(answer.toString().trim());
+      }
+
+      const questionData = {
+        question: question.toString().trim(),
+        language: config.language,
+        options: options,
+        correctAnswer: correctAnswerIndex === -1 ? 0 : correctAnswerIndex,
+        correctAnswerText: answer.toString().trim(),
+        category: row[columnIndices.category] ? row[columnIndices.category].toString().trim() : 'General',
+        subCategory: row[columnIndices.subCategory] ? row[columnIndices.subCategory].toString().trim() : '',
+        examType: row[columnIndices.examType] ? row[columnIndices.examType].toString().trim() : 'MCAT',
+        wikipediaLink: row[columnIndices.wikipediaLink] ? row[columnIndices.wikipediaLink].toString().trim() : '',
+        originalIndex: row[columnIndices.index] ? parseInt(row[columnIndices.index]) : index + 1,
+        approved: row[columnIndices.approved] ? 
+          (row[columnIndices.approved].toString().toLowerCase() === 'yes' || 
+           row[columnIndices.approved].toString().toLowerCase() === 'sí' || 
+           row[columnIndices.approved].toString().toLowerCase() === 'oui') : false,
+        status: 'active',
+        importSource: 'excel_import'
+      };
+
+      parsedQuestions.push(questionData);
+      
+    } catch (error) {
+      console.error(`Error parsing row ${index + 2} in ${config.sheetName}:`, error.message);
+    }
+  });
+
+  return parsedQuestions;
+};
 // Get all questions with filters
 export const getAllQuestions = async (req, res) => {
   try {
