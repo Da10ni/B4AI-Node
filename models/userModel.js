@@ -74,6 +74,11 @@ const userSchema = new mongoose.Schema({
       default: "",
     },
   },
+  hasPaid: {
+    type: Boolean,
+    default: false,
+  },
+
   // ✅ Added timestamps
   createdAt: {
     type: Date,
@@ -92,7 +97,7 @@ const userSchema = new mongoose.Schema({
 });
 
 // ✅ Update updatedAt on save
-userSchema.pre('save', function(next) {
+userSchema.pre("save", function (next) {
   this.updatedAt = Date.now();
   next();
 });
