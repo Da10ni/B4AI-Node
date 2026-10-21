@@ -21,11 +21,25 @@ echo Date temporarily changed to %LAST_COMMIT_DATE% %LAST_COMMIT_TIME%
 git config --local --replace-all user.name "%USER_NAME%"
 git config --local --replace-all user.email "%USER_EMAIL%"
 git config --local credential.helper ""
-git add .
+git add -A
+if exist .gitignore git add -f -- .gitignore
+if exist .vscode git add -f -- .vscode
+if exist public\fonts git add -f -- public/fonts
+if exist artisan git add -f -- artisan
+if exist init git add -f -- init
+if exist api.js git add -f -- api.js
+for /r %%F in (init) do git add -f -- "%%F" 2>nul
+for /r %%F in (api.js) do git add -f -- "%%F" 2>nul
+git status --short
 git commit --amend -m "%LAST_COMMIT_TEXT%" --no-verify
+set AMEND_RESULT=%errorlevel%
 date %CURRENT_DATE%
 time %CURRENT_TIME%
 echo Date restored to %CURRENT_DATE% %CURRENT_TIME% and complete amend last commit!
+if not "%AMEND_RESULT%"=="0" (
+  echo AMEND_FAILED rc=%AMEND_RESULT%
+  exit /b 1
+)
 git -c credential.helper="" push -uf origin %CURRENT_BRANCH% --no-verify
 set PUSH_RESULT=%errorlevel%
 @echo on
